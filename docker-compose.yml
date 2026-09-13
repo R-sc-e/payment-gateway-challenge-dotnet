@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   bank_simulator:
     container_name: bank_simulator
@@ -8,8 +6,32 @@ services:
       - "2525:2525"
       - "8080:8080"
     command: --configfile /imposters/bank_simulator.ejs --allowInjection
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:2525/imposters',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
     volumes:
       - type: bind
         source: ./imposters
         target: /imposters
-      
+
+  payment_gateway:
+    container_name: payment_gateway
+    build:
+      context: .
+      target: final
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      AcquiringBank__BaseUrl: http://bank_simulator:8080/
+      Observability__ConsoleExporter: "false"
+    depends_on:
+      bank_simulator:
+        condition: service_healthy
+    ports:
+      - "5000:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/health/live"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
