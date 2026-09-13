@@ -1,26 +1,70 @@
-﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc;
 
-using PaymentGateway.Api.Models.Responses;
+using PaymentGateway.Api.Contracts;
+using PaymentGateway.Api.Observability;
 using PaymentGateway.Api.Services;
+using PaymentGateway.Api.Validation;
 
 namespace PaymentGateway.Api.Controllers;
 
-[Route("api/[controller]")]
 [ApiController]
-public class PaymentsController : Controller
+[Route("api/payments")]
+public sealed class PaymentsController(
+    PaymentRequestValidator validator,
+    PaymentService paymentService,
+    PaymentTelemetry telemetry,
+    ILogger<PaymentsController> logger) : ControllerBase
 {
-    private readonly PaymentsRepository _paymentsRepository;
-
-    public PaymentsController(PaymentsRepository paymentsRepository)
+    [HttpGet("{id:guid}")]
+    [ProducesResponseType<PaymentResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status500InternalServerError)]
+    public ActionResult<PaymentResponse> GetPayment(Guid id)
     {
-        _paymentsRepository = paymentsRepository;
+        var payment = paymentService.Get(id);
+        if (payment is not null)
+        {
+            return Ok(payment);
+        }
+
+        return NotFound(ProblemResponses.Create(
+            HttpContext,
+            StatusCodes.Status404NotFound,
+            "Payment was not found",
+            "https://httpstatuses.com/404"));
     }
 
-    [HttpGet("{id:guid}")]
-    public async Task<ActionResult<PostPaymentResponse?>> GetPaymentAsync(Guid id)
+    [HttpPost]
+    [ProducesResponseType<PaymentResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ValidationProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status502BadGateway)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status500InternalServerError)]
+    public async Task<ActionResult<PaymentResponse>> PostPayment(
+        [FromBody] PostPaymentRequest? request,
+        CancellationToken cancellationToken)
     {
-        var payment = _paymentsRepository.Get(id);
+        if (request is null)
+        {
+            telemetry.RecordRejected();
+            return BadRequest(ProblemResponses.Rejected(
+                HttpContext,
+                new Dictionary<string, string[]>
+                {
+                    ["request"] = ["A payment request body is required."]
+                }));
+        }
 
-        return new OkObjectResult(payment);
+        var errors = validator.Validate(request);
+        if (errors.Count > 0)
+        {
+            telemetry.RecordRejected();
+            logger.LogInformation("Payment request rejected with {ValidationErrorCount} validation errors", errors.Count);
+            return BadRequest(ProblemResponses.Rejected(
+                HttpContext,
+                errors.ToDictionary(entry => entry.Key, entry => entry.Value)));
+        }
+
+        var payment = await paymentService.ProcessAsync(request, cancellationToken);
+        return Ok(payment);
     }
 }
