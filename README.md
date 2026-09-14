@@ -91,12 +91,6 @@ Run the suite with:
 dotnet test PaymentGateway.sln --configuration Release
 ```
 
-Alternatively, run the .NET 8 Docker test stage:
-
-```bash
-docker build --target test .
-```
-
 The test approach combines:
 
 - Validator tests for field rules, boundary values, deterministic expiry checks, and independent validation paths.
