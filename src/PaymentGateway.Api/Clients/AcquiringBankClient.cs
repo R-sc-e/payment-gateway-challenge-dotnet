@@ -1,5 +1,7 @@
 using System.Net.Http.Json;
 
+using PaymentGateway.Api.Enums;
+
 namespace PaymentGateway.Api.Clients;
 
 public sealed class AcquiringBankClient(HttpClient httpClient) : IAcquiringBankClient

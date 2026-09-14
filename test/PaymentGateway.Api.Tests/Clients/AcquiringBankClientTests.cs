@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 
 using PaymentGateway.Api.Clients;
+using PaymentGateway.Api.Enums;
 using PaymentGateway.Api.Tests.TestDoubles;
 
 namespace PaymentGateway.Api.Tests.Clients;

@@ -4,11 +4,13 @@ using PaymentGateway.Api.Domain;
 
 namespace PaymentGateway.Api.Infrastructure;
 
-public sealed class InMemoryPaymentRepository : IPaymentRepository
+public sealed class PaymentRepository : IPaymentRepository
 {
-    private readonly ConcurrentDictionary<Guid, Payment> _payments = new();
+    private readonly ConcurrentDictionary<Guid, PaymentModel> _payments = new();
 
-    public void Add(Payment payment)
+    public int Count => _payments.Count;
+
+    public void Add(PaymentModel payment)
     {
         if (!_payments.TryAdd(payment.Id, payment))
         {
@@ -16,5 +18,5 @@ public sealed class InMemoryPaymentRepository : IPaymentRepository
         }
     }
 
-    public Payment? Get(Guid id) => _payments.GetValueOrDefault(id);
+    public PaymentModel? Get(Guid id) => _payments.GetValueOrDefault(id);
 }

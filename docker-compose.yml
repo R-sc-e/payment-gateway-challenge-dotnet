@@ -24,7 +24,6 @@ services:
     environment:
       ASPNETCORE_URLS: http://+:8080
       AcquiringBank__BaseUrl: http://bank_simulator:8080/
-      Observability__ConsoleExporter: "false"
     depends_on:
       bank_simulator:
         condition: service_healthy

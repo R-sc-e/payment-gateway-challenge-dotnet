@@ -1,11 +1,6 @@
-namespace PaymentGateway.Api.Clients;
+using PaymentGateway.Api.Enums;
 
-public enum AcquiringBankFailure
-{
-    Unavailable,
-    Timeout,
-    InvalidResponse
-}
+namespace PaymentGateway.Api.Clients;
 
 public sealed class AcquiringBankException(
     AcquiringBankFailure failure,

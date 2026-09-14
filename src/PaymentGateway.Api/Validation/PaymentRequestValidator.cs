@@ -1,123 +1,75 @@
+using FluentValidation;
+
 using PaymentGateway.Api.Contracts;
 
 namespace PaymentGateway.Api.Validation;
 
-public sealed class PaymentRequestValidator(TimeProvider timeProvider)
+public sealed class PaymentRequestValidator : AbstractValidator<PostPaymentRequest>
 {
     private static readonly HashSet<string> SupportedCurrencies =
         new(StringComparer.Ordinal) { "GBP", "USD", "EUR" };
 
-    public IReadOnlyDictionary<string, string[]> Validate(PostPaymentRequest request)
+    private readonly TimeProvider _timeProvider;
+
+    public PaymentRequestValidator(TimeProvider timeProvider)
     {
-        var errors = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        _timeProvider = timeProvider;
+        RuleLevelCascadeMode = CascadeMode.Stop;
 
-        ValidateCardNumber(request.CardNumber, errors);
-        ValidateExpiry(request.ExpiryMonth, request.ExpiryYear, errors);
-        ValidateCurrency(request.Currency, errors);
+        RuleFor(request => request.CardNumber)
+            .NotEmpty()
+            .WithMessage("Card number is required.")
+            .Length(14, 19)
+            .WithMessage("Card number must be between 14 and 19 characters.")
+            .Must(ContainOnlyAsciiDigits)
+            .WithMessage("Card number must contain only numeric characters.")
+            .OverridePropertyName("cardNumber");
 
-        if (request.Amount <= 0)
-        {
-            Add(errors, "amount", "Amount must be greater than zero.");
-        }
+        RuleFor(request => request.ExpiryMonth)
+            .InclusiveBetween(1, 12)
+            .WithMessage("Expiry month must be between 1 and 12.")
+            .OverridePropertyName("expiryMonth");
 
-        ValidateCvv(request.Cvv, errors);
+        RuleFor(request => request.ExpiryYear)
+            .GreaterThan(0)
+            .WithMessage("Expiry year is required.")
+            .Must(BeCurrentOrFutureExpiry)
+            .When(
+                request => request.ExpiryMonth is >= 1 and <= 12 && request.ExpiryYear > 0,
+                ApplyConditionTo.CurrentValidator)
+            .WithMessage("Card has expired.")
+            .OverridePropertyName("expiryYear");
 
-        return errors.ToDictionary(entry => entry.Key, entry => entry.Value.ToArray());
+        RuleFor(request => request.Currency)
+            .NotEmpty()
+            .WithMessage("Currency is required.")
+            .Length(3)
+            .WithMessage("Currency must be three characters.")
+            .Must(currency => SupportedCurrencies.Contains(currency!))
+            .WithMessage("Currency must be one of GBP, USD, or EUR.")
+            .OverridePropertyName("currency");
+
+        RuleFor(request => request.Amount)
+            .GreaterThan(0)
+            .WithMessage("Amount must be greater than zero.")
+            .OverridePropertyName("amount");
+
+        RuleFor(request => request.Cvv)
+            .NotEmpty()
+            .WithMessage("CVV is required.")
+            .Length(3, 4)
+            .WithMessage("CVV must be between 3 and 4 characters.")
+            .Must(ContainOnlyAsciiDigits)
+            .WithMessage("CVV must contain only numeric characters.")
+            .OverridePropertyName("cvv");
     }
 
-    private static void ValidateCardNumber(string? cardNumber, IDictionary<string, List<string>> errors)
+    private bool BeCurrentOrFutureExpiry(PostPaymentRequest request, int expiryYear)
     {
-        if (string.IsNullOrWhiteSpace(cardNumber))
-        {
-            Add(errors, "cardNumber", "Card number is required.");
-            return;
-        }
-
-        if (cardNumber.Length is < 14 or > 19)
-        {
-            Add(errors, "cardNumber", "Card number must be between 14 and 19 characters.");
-        }
-
-        if (!ContainsOnlyAsciiDigits(cardNumber))
-        {
-            Add(errors, "cardNumber", "Card number must contain only numeric characters.");
-        }
+        var now = _timeProvider.GetUtcNow();
+        return expiryYear > now.Year || expiryYear == now.Year && request.ExpiryMonth >= now.Month;
     }
 
-    private void ValidateExpiry(int expiryMonth, int expiryYear, IDictionary<string, List<string>> errors)
-    {
-        if (expiryMonth is < 1 or > 12)
-        {
-            Add(errors, "expiryMonth", "Expiry month must be between 1 and 12.");
-        }
-
-        if (expiryYear <= 0)
-        {
-            Add(errors, "expiryYear", "Expiry year is required.");
-            return;
-        }
-
-        if (expiryMonth is < 1 or > 12)
-        {
-            return;
-        }
-
-        var now = timeProvider.GetUtcNow();
-        if (expiryYear < now.Year || expiryYear == now.Year && expiryMonth < now.Month)
-        {
-            Add(errors, "expiryYear", "Card has expired.");
-        }
-    }
-
-    private static void ValidateCurrency(string? currency, IDictionary<string, List<string>> errors)
-    {
-        if (string.IsNullOrWhiteSpace(currency))
-        {
-            Add(errors, "currency", "Currency is required.");
-            return;
-        }
-
-        if (currency.Length != 3)
-        {
-            Add(errors, "currency", "Currency must be three characters.");
-        }
-
-        if (!SupportedCurrencies.Contains(currency))
-        {
-            Add(errors, "currency", "Currency must be one of GBP, USD, or EUR.");
-        }
-    }
-
-    private static void ValidateCvv(string? cvv, IDictionary<string, List<string>> errors)
-    {
-        if (string.IsNullOrWhiteSpace(cvv))
-        {
-            Add(errors, "cvv", "CVV is required.");
-            return;
-        }
-
-        if (cvv.Length is < 3 or > 4)
-        {
-            Add(errors, "cvv", "CVV must be between 3 and 4 characters.");
-        }
-
-        if (!ContainsOnlyAsciiDigits(cvv))
-        {
-            Add(errors, "cvv", "CVV must contain only numeric characters.");
-        }
-    }
-
-    private static bool ContainsOnlyAsciiDigits(string value) =>
-        value.All(character => character is >= '0' and <= '9');
-
-    private static void Add(IDictionary<string, List<string>> errors, string field, string message)
-    {
-        if (!errors.TryGetValue(field, out var fieldErrors))
-        {
-            fieldErrors = [];
-            errors[field] = fieldErrors;
-        }
-
-        fieldErrors.Add(message);
-    }
+    private static bool ContainOnlyAsciiDigits(string? value) =>
+        value is not null && value.All(character => character is >= '0' and <= '9');
 }

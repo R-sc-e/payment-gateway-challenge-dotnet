@@ -1,8 +1,11 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 using PaymentGateway.Api.Clients;
 using PaymentGateway.Api.Contracts;
-using PaymentGateway.Api.Observability;
+using PaymentGateway.Api.Domain;
+using PaymentGateway.Api.Enums;
+using PaymentGateway.Api.Infrastructure;
 using PaymentGateway.Api.Services;
 using PaymentGateway.Api.Tests.TestDoubles;
 
@@ -21,30 +24,36 @@ public sealed class PaymentServiceTests
                 authorized,
                 authorized ? "auth-code" : string.Empty))
         };
-        var repository = new RecordingPaymentRepository();
-        using var telemetry = new PaymentTelemetry();
-        var service = CreateService(bank, repository, telemetry);
+        var repository = new PaymentRepository();
+        var logger = new RecordingLogger<PaymentService>();
+        var service = CreateService(bank, repository, logger);
         var request = TestRequests.Valid(cardNumber: "2222405343248877");
 
-        var response = await service.ProcessAsync(request, CancellationToken.None);
+        var result = await service.ProcessAsync(request, CancellationToken.None);
 
-        Assert.NotEqual(Guid.Empty, response.Id);
-        Assert.Equal(expectedStatus, response.Status);
-        Assert.Equal("8877", response.CardNumberLastFour);
-        Assert.Equal(request.ExpiryMonth, response.ExpiryMonth);
-        Assert.Equal(request.ExpiryYear, response.ExpiryYear);
-        Assert.Equal(request.Currency, response.Currency);
-        Assert.Equal(request.Amount, response.Amount);
-        Assert.NotNull(repository.Get(response.Id));
+        Assert.NotEqual(Guid.Empty, result.Id);
+        Assert.Equal(expectedStatus, result.Status);
+        Assert.Equal("8877", result.CardNumberLastFour);
+        Assert.Equal(request.ExpiryMonth, result.ExpiryMonth);
+        Assert.Equal(request.ExpiryYear, result.ExpiryYear);
+        Assert.Equal(request.Currency, result.Currency);
+        Assert.Equal(request.Amount, result.Amount);
+        Assert.NotNull(repository.Get(result.Id));
         Assert.Equal(1, repository.Count);
+
+        var entry = Assert.Single(logger.Entries, item => item.Level == LogLevel.Information);
+        Assert.Equal(result.Id, entry.Properties["PaymentId"]);
+        Assert.Equal(expectedStatus, entry.Properties["PaymentStatus"]);
+        Assert.DoesNotContain(request.CardNumber!, entry.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(request.Cvv!, entry.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("auth-code", entry.Message, StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task SendsExactMappedRequestToBank()
     {
         var bank = new StubBankClient();
-        using var telemetry = new PaymentTelemetry();
-        var service = CreateService(bank, new RecordingPaymentRepository(), telemetry);
+        var service = CreateService(bank, new PaymentRepository());
         var request = TestRequests.Valid(
             cardNumber: "1234567890123456",
             expiryMonth: 4,
@@ -63,23 +72,73 @@ public sealed class PaymentServiceTests
         Assert.Equal("0123", sent.Cvv);
     }
 
+    [Theory]
+    [InlineData("cardNumber")]
+    [InlineData("currency")]
+    [InlineData("cvv")]
+    public async Task RejectsMissingRequiredValuesAtServiceBoundary(string missingField)
+    {
+        var bank = new StubBankClient();
+        var repository = new PaymentRepository();
+        var service = CreateService(bank, repository);
+        var request = TestRequests.Valid(
+            cardNumber: missingField == "cardNumber" ? null : "2222405343248877",
+            currency: missingField == "currency" ? null : "GBP",
+            cvv: missingField == "cvv" ? null : "123");
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            service.ProcessAsync(request, CancellationToken.None));
+
+        Assert.Equal(0, bank.CallCount);
+        Assert.Equal(0, repository.Count);
+    }
+
     [Fact]
     public async Task DoesNotStorePaymentWhenBankFails()
     {
+        const string cardNumber = "2222405343248877";
+        const string cvv = "987";
         var bank = new StubBankClient
         {
             Handler = (_, _) => throw new AcquiringBankException(
                 AcquiringBankFailure.Unavailable,
                 "unavailable")
         };
-        var repository = new RecordingPaymentRepository();
-        using var telemetry = new PaymentTelemetry();
-        var service = CreateService(bank, repository, telemetry);
+        var repository = new PaymentRepository();
+        var logger = new RecordingLogger<PaymentService>();
+        var service = CreateService(bank, repository, logger);
+        var request = TestRequests.Valid(cardNumber: cardNumber, cvv: cvv);
 
         await Assert.ThrowsAsync<AcquiringBankException>(() =>
-            service.ProcessAsync(TestRequests.Valid(), CancellationToken.None));
+            service.ProcessAsync(request, CancellationToken.None));
 
         Assert.Equal(0, repository.Count);
+        var entry = Assert.Single(logger.Entries, item => item.Level == LogLevel.Warning);
+        Assert.Equal(AcquiringBankFailure.Unavailable, entry.Properties["BankFailure"]);
+        AssertLogExcludesSensitiveValues(entry, cardNumber, cvv, "authorization-code");
+    }
+
+    [Fact]
+    public async Task LogsInvalidBankResponseAsError()
+    {
+        const string cardNumber = "2222405343248877";
+        const string cvv = "987";
+        var bank = new StubBankClient
+        {
+            Handler = (_, _) => throw new AcquiringBankException(
+                AcquiringBankFailure.InvalidResponse,
+                "invalid response")
+        };
+        var logger = new RecordingLogger<PaymentService>();
+        var service = CreateService(bank, new PaymentRepository(), logger);
+
+        await Assert.ThrowsAsync<AcquiringBankException>(() =>
+            service.ProcessAsync(
+                TestRequests.Valid(cardNumber: cardNumber, cvv: cvv),
+                CancellationToken.None));
+
+        var entry = Assert.Single(logger.Entries, item => item.Level == LogLevel.Error);
+        AssertLogExcludesSensitiveValues(entry, cardNumber, cvv, "authorization-code");
     }
 
     [Fact]
@@ -91,9 +150,8 @@ public sealed class PaymentServiceTests
         {
             Handler = (_, token) => Task.FromCanceled<BankPaymentResponse>(token)
         };
-        var repository = new RecordingPaymentRepository();
-        using var telemetry = new PaymentTelemetry();
-        var service = CreateService(bank, repository, telemetry);
+        var repository = new PaymentRepository();
+        var service = CreateService(bank, repository);
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             service.ProcessAsync(TestRequests.Valid(), cancellation.Token));
@@ -104,20 +162,41 @@ public sealed class PaymentServiceTests
     [Fact]
     public void GetsExistingPaymentAndReturnsNullForUnknownId()
     {
-        var repository = new RecordingPaymentRepository();
-        var payment = new Domain.Payment(
+        var repository = new PaymentRepository();
+        var payment = new PaymentModel(
             Guid.NewGuid(), PaymentStatus.Authorized, "1234", 7, 2031, "GBP", 100);
         repository.Add(payment);
-        using var telemetry = new PaymentTelemetry();
-        var service = CreateService(new StubBankClient(), repository, telemetry);
+        var service = CreateService(new StubBankClient(), repository);
 
-        Assert.Equal(payment.Id, service.Get(payment.Id)?.Id);
+        var result = service.Get(payment.Id);
+
+        Assert.NotNull(result);
+        Assert.Equal(payment.Id, result.Id);
+        Assert.Equal(payment.Status, result.Status);
+        Assert.Equal(payment.CardNumberLastFour, result.CardNumberLastFour);
+        Assert.Equal(payment.ExpiryMonth, result.ExpiryMonth);
+        Assert.Equal(payment.ExpiryYear, result.ExpiryYear);
+        Assert.Equal(payment.Currency, result.Currency);
+        Assert.Equal(payment.Amount, result.Amount);
         Assert.Null(service.Get(Guid.NewGuid()));
     }
 
     private static PaymentService CreateService(
         IAcquiringBankClient bank,
-        Domain.IPaymentRepository repository,
-        PaymentTelemetry telemetry) =>
-        new(bank, repository, telemetry, NullLogger<PaymentService>.Instance);
+        IPaymentRepository repository,
+        ILogger<PaymentService>? logger = null) =>
+        new(bank, repository, logger ?? NullLogger<PaymentService>.Instance);
+
+    private static void AssertLogExcludesSensitiveValues(RecordedLog entry, params string[] values)
+    {
+        var exception = entry.Exception?.ToString() ?? string.Empty;
+        var properties = string.Join(',', entry.Properties.Select(property => property.Value));
+
+        foreach (var value in values)
+        {
+            Assert.DoesNotContain(value, entry.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain(value, exception, StringComparison.Ordinal);
+            Assert.DoesNotContain(value, properties, StringComparison.Ordinal);
+        }
+    }
 }

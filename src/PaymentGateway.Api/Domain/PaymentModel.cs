@@ -1,10 +1,10 @@
 using PaymentGateway.Api.Enums;
 
-namespace PaymentGateway.Api.Contracts;
+namespace PaymentGateway.Api.Domain;
 
-public sealed class PaymentResponse
+public sealed class PaymentModel
 {
-    public PaymentResponse(
+    public PaymentModel(
         Guid id,
         PaymentStatus status,
         string cardNumberLastFour,

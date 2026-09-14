@@ -2,7 +2,7 @@ namespace PaymentGateway.Api.Domain;
 
 public interface IPaymentRepository
 {
-    void Add(Payment payment);
+    void Add(PaymentModel payment);
 
-    Payment? Get(Guid id);
+    PaymentModel? Get(Guid id);
 }

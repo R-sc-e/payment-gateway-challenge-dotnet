@@ -6,6 +6,7 @@ using System.Text.Json.Serialization;
 
 using PaymentGateway.Api.Clients;
 using PaymentGateway.Api.Contracts;
+using PaymentGateway.Api.Enums;
 using PaymentGateway.Api.Tests.TestDoubles;
 
 namespace PaymentGateway.Api.Tests.Integration;
@@ -42,7 +43,14 @@ public sealed class PaymentsApiTests
         var retrieved = await getResponse.Content.ReadFromJsonAsync<PaymentResponse>(JsonOptions);
 
         Assert.Equal(HttpStatusCode.OK, getResponse.StatusCode);
-        Assert.Equal(payment, retrieved);
+        Assert.NotNull(retrieved);
+        Assert.Equal(payment.Id, retrieved.Id);
+        Assert.Equal(payment.Status, retrieved.Status);
+        Assert.Equal(payment.CardNumberLastFour, retrieved.CardNumberLastFour);
+        Assert.Equal(payment.ExpiryMonth, retrieved.ExpiryMonth);
+        Assert.Equal(payment.ExpiryYear, retrieved.ExpiryYear);
+        Assert.Equal(payment.Currency, retrieved.Currency);
+        Assert.Equal(payment.Amount, retrieved.Amount);
     }
 
     [Fact]
@@ -133,8 +141,11 @@ public sealed class PaymentsApiTests
 
         var response = await client.PostAsJsonAsync("/api/payments", TestRequests.Valid());
         var json = await response.Content.ReadAsStringAsync();
+        using var problem = JsonDocument.Parse(json);
 
         Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+        Assert.True(problem.RootElement.TryGetProperty("traceId", out _));
         Assert.DoesNotContain("sensitive internal detail", json, StringComparison.Ordinal);
     }
 
@@ -151,7 +162,12 @@ public sealed class PaymentsApiTests
         Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
         Assert.Equal(404, problem.RootElement.GetProperty("status").GetInt32());
         Assert.True(problem.RootElement.TryGetProperty("traceId", out _));
+
         Assert.Equal(HttpStatusCode.NotFound, malformed.StatusCode);
+        Assert.Equal("application/problem+json", malformed.Content.Headers.ContentType?.MediaType);
+        using var malformedProblem = JsonDocument.Parse(await malformed.Content.ReadAsStringAsync());
+        Assert.Equal(404, malformedProblem.RootElement.GetProperty("status").GetInt32());
+        Assert.True(malformedProblem.RootElement.TryGetProperty("traceId", out _));
     }
 
     [Theory]
@@ -171,10 +187,12 @@ public sealed class PaymentsApiTests
     public static TheoryData<PostPaymentRequest> InvalidRequests => new()
     {
         TestRequests.Valid(cardNumber: "123"),
+        TestRequests.Valid(cardNumber: "2222405343248877\n"),
         TestRequests.Valid(expiryMonth: 13),
         TestRequests.Valid(expiryMonth: 5, expiryYear: 2030),
         TestRequests.Valid(currency: "gbp"),
         TestRequests.Valid(amount: 0),
-        TestRequests.Valid(cvv: "12")
+        TestRequests.Valid(cvv: "12"),
+        TestRequests.Valid(cvv: "123\n")
     };
 }
