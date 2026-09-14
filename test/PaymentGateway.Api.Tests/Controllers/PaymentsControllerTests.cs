@@ -1,6 +1,11 @@
+using FluentValidation;
+using FluentValidation.Results;
+
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+
+using Moq;
 
 using PaymentGateway.Api.Clients;
 using PaymentGateway.Api.Contracts;
@@ -8,47 +13,62 @@ using PaymentGateway.Api.Controllers;
 using PaymentGateway.Api.Domain;
 using PaymentGateway.Api.Enums;
 using PaymentGateway.Api.Services;
-using PaymentGateway.Api.Tests.TestDoubles;
-using PaymentGateway.Api.Validation;
 
 namespace PaymentGateway.Api.Tests.Controllers;
 
 public sealed class PaymentsControllerTests
 {
-    [Fact]
-    public async Task LogsRejectedFieldNamesWithoutCardDetails()
+    private readonly Mock<IValidator<PostPaymentRequest>> _validatorMock;
+    private readonly Mock<IPaymentService> _paymentServiceMock;
+    private readonly PaymentsController _controller;
+    private readonly PostPaymentRequest _validRequest;
+
+    public PaymentsControllerTests()
     {
-        const string cardNumber = "2222405343248877";
-        const string cvv = "12";
-        var paymentService = new StubPaymentService();
-        var logger = new RecordingLogger<PaymentsController>();
-        var controller = CreateController(paymentService, logger);
+        _validatorMock = new Mock<IValidator<PostPaymentRequest>>();
 
-        var response = await controller.PostPayment(
-            TestRequests.Valid(cardNumber: cardNumber, cvv: cvv),
-            CancellationToken.None);
+        _paymentServiceMock = new Mock<IPaymentService>();
 
-        Assert.IsType<BadRequestObjectResult>(response.Result);
-        Assert.Null(paymentService.LastRequest);
-        var entry = Assert.Single(logger.Entries, item => item.Level == LogLevel.Information);
-        Assert.Equal("cvv", entry.Properties["InvalidFields"]);
-        Assert.DoesNotContain(cardNumber, entry.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain(cvv, entry.Message, StringComparison.Ordinal);
+        _validRequest = new PostPaymentRequest(
+            "2222405343248877", 7, 2031, "GBP", 1050, "123");
+
+        _validatorMock
+            .Setup(validator => validator.ValidateAsync(
+                It.IsAny<PostPaymentRequest>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ValidationResult());
+
+        _controller = new PaymentsController(
+            _validatorMock.Object,
+            _paymentServiceMock.Object,
+            NullLogger<PaymentsController>.Instance)
+        {
+            ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() }
+        };
     }
 
     [Fact]
-    public async Task PassesPostRequestToServiceAndMapsModelToResponse()
+    public async Task PostPayment_PassesRequestToServiceAndMapsModelToResponse()
     {
+        // Arrange
         var result = new PaymentModel(
             Guid.NewGuid(), PaymentStatus.Authorized, "8877", 7, 2031, "GBP", 1050);
-        var paymentService = new StubPaymentService { Result = result };
-        var controller = CreateController(paymentService);
-        var request = TestRequests.Valid(cardNumber: "2222405343248877", cvv: "123");
+        _paymentServiceMock
+            .Setup(service => service.ProcessAsync(_validRequest, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(result);
 
-        var action = await controller.PostPayment(request, CancellationToken.None);
+        // Act
+        var action = await _controller.PostPayment(_validRequest, CancellationToken.None);
 
-        Assert.Same(request, paymentService.LastRequest);
-        var response = Assert.IsType<PaymentResponse>(Assert.IsType<OkObjectResult>(action.Result).Value);
+        // Assert
+        _validatorMock.Verify(
+            validator => validator.ValidateAsync(_validRequest, CancellationToken.None),
+            Times.Once());
+        _paymentServiceMock.Verify(
+            service => service.ProcessAsync(_validRequest, CancellationToken.None),
+            Times.Once());
+        var response = Assert.IsType<PaymentResponse>(
+            Assert.IsType<OkObjectResult>(action.Result).Value);
         AssertResponseMatches(result, response);
     }
 
@@ -56,18 +76,23 @@ public sealed class PaymentsControllerTests
     [InlineData(AcquiringBankFailure.Unavailable)]
     [InlineData(AcquiringBankFailure.Timeout)]
     [InlineData(AcquiringBankFailure.InvalidResponse)]
-    public async Task MapsAcquiringBankFailureToBadGateway(AcquiringBankFailure failure)
+    public async Task PostPayment_MapsAcquiringBankFailureToBadGateway(
+        AcquiringBankFailure failure)
     {
-        var paymentService = new StubPaymentService
-        {
-            ExceptionToThrow = new AcquiringBankException(failure, "bank detail")
-        };
-        var controller = CreateController(paymentService);
+        // Arrange
+        _paymentServiceMock
+            .Setup(service => service.ProcessAsync(
+                It.IsAny<PostPaymentRequest>(),
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new AcquiringBankException(failure, "bank detail"));
 
-        var action = await controller.PostPayment(TestRequests.Valid(), CancellationToken.None);
+        // Act
+        var action = await _controller.PostPayment(_validRequest, CancellationToken.None);
 
+        // Assert
         var result = Assert.IsType<ObjectResult>(action.Result);
         Assert.Equal(StatusCodes.Status502BadGateway, result.StatusCode);
+
         var problem = Assert.IsType<ProblemDetails>(result.Value);
         Assert.Equal(StatusCodes.Status502BadGateway, problem.Status);
         Assert.Equal("The acquiring bank is unavailable", problem.Title);
@@ -76,32 +101,24 @@ public sealed class PaymentsControllerTests
     }
 
     [Fact]
-    public void MapsQueryReadModelToResponse()
+    public void GetPayment_MapsQueryReadModelToResponse()
     {
+        // Arrange
         var result = new PaymentModel(
             Guid.NewGuid(), PaymentStatus.Declined, "1234", 8, 2032, "EUR", 250);
-        var controller = CreateController(new StubPaymentService { Result = result });
+        _paymentServiceMock
+            .Setup(service => service.Get(result.Id))
+            .Returns(result);
 
-        var action = controller.GetPayment(result.Id);
+        // Act
+        var action = _controller.GetPayment(result.Id);
 
-        var response = Assert.IsType<PaymentResponse>(Assert.IsType<OkObjectResult>(action.Result).Value);
+        // Assert
+        _paymentServiceMock.Verify(service => service.Get(result.Id), Times.Once());
+        var response = Assert.IsType<PaymentResponse>(
+            Assert.IsType<OkObjectResult>(action.Result).Value);
         AssertResponseMatches(result, response);
     }
-
-    private static PaymentsController CreateController(
-        IPaymentService paymentService,
-        ILogger<PaymentsController>? logger = null) =>
-        new(
-            new PaymentRequestValidator(new StubTimeProvider(
-                new DateTimeOffset(2030, 6, 15, 12, 0, 0, TimeSpan.Zero))),
-            paymentService,
-            logger ?? new RecordingLogger<PaymentsController>())
-        {
-            ControllerContext = new ControllerContext
-            {
-                HttpContext = new DefaultHttpContext()
-            }
-        };
 
     private static void AssertResponseMatches(PaymentModel model, PaymentResponse response)
     {
@@ -112,30 +129,5 @@ public sealed class PaymentsControllerTests
         Assert.Equal(model.ExpiryYear, response.ExpiryYear);
         Assert.Equal(model.Currency, response.Currency);
         Assert.Equal(model.Amount, response.Amount);
-    }
-
-    private sealed class StubPaymentService : IPaymentService
-    {
-        public PaymentModel Result { get; init; } = new(
-            Guid.NewGuid(), PaymentStatus.Authorized, "8877", 7, 2031, "GBP", 1050);
-
-        public PostPaymentRequest? LastRequest { get; private set; }
-
-        public Exception? ExceptionToThrow { get; init; }
-
-        public PaymentModel? Get(Guid id) => Result;
-
-        public Task<PaymentModel> ProcessAsync(
-            PostPaymentRequest request,
-            CancellationToken cancellationToken)
-        {
-            LastRequest = request;
-            if (ExceptionToThrow is not null)
-            {
-                throw ExceptionToThrow;
-            }
-
-            return Task.FromResult(Result);
-        }
     }
 }

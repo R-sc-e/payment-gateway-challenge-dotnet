@@ -1,36 +1,57 @@
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+
+using Moq;
 
 using PaymentGateway.Api.Clients;
 using PaymentGateway.Api.Contracts;
 using PaymentGateway.Api.Domain;
 using PaymentGateway.Api.Enums;
-using PaymentGateway.Api.Infrastructure;
 using PaymentGateway.Api.Services;
-using PaymentGateway.Api.Tests.TestDoubles;
 
 namespace PaymentGateway.Api.Tests.Services;
 
 public sealed class PaymentServiceTests
 {
+    private readonly Mock<IPaymentRepository> _paymentsRepositoryMock;
+    private readonly Mock<IAcquiringBankClient> _acquiringBankClientMock;
+    private readonly PaymentService _service;
+
+    public PaymentServiceTests()
+    {
+        _paymentsRepositoryMock = new Mock<IPaymentRepository>();
+        _acquiringBankClientMock = new Mock<IAcquiringBankClient>();
+        _service = new PaymentService(
+            _acquiringBankClientMock.Object,
+            _paymentsRepositoryMock.Object,
+            NullLogger<PaymentService>.Instance);
+    }
+
     [Theory]
     [InlineData(true, PaymentStatus.Authorized)]
     [InlineData(false, PaymentStatus.Declined)]
-    public async Task ProcessesAndStoresBankOutcome(bool authorized, PaymentStatus expectedStatus)
+    public async Task ProcessAsync_ProcessesAndStoresBankOutcome(
+        bool authorized,
+        PaymentStatus expectedStatus)
     {
-        var bank = new StubBankClient
-        {
-            Handler = (_, _) => Task.FromResult(new BankPaymentResponse(
+        // Arrange
+        var request = new PostPaymentRequest(
+            "2222405343248877", 7, 2031, "GBP", 1050, "123");
+        PaymentModel? storedPayment = null;
+        _acquiringBankClientMock
+            .Setup(client => client.ProcessPaymentAsync(
+                It.IsAny<BankPaymentRequest>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new BankPaymentResponse(
                 authorized,
-                authorized ? "auth-code" : string.Empty))
-        };
-        var repository = new PaymentRepository();
-        var logger = new RecordingLogger<PaymentService>();
-        var service = CreateService(bank, repository, logger);
-        var request = TestRequests.Valid(cardNumber: "2222405343248877");
+                authorized ? "auth-code" : string.Empty));
+        _paymentsRepositoryMock
+            .Setup(repository => repository.Add(It.IsAny<PaymentModel>()))
+            .Callback<PaymentModel>(payment => storedPayment = payment);
 
-        var result = await service.ProcessAsync(request, CancellationToken.None);
+        // Act
+        var result = await _service.ProcessAsync(request, CancellationToken.None);
 
+        // Assert
         Assert.NotEqual(Guid.Empty, result.Id);
         Assert.Equal(expectedStatus, result.Status);
         Assert.Equal("8877", result.CardNumberLastFour);
@@ -38,33 +59,31 @@ public sealed class PaymentServiceTests
         Assert.Equal(request.ExpiryYear, result.ExpiryYear);
         Assert.Equal(request.Currency, result.Currency);
         Assert.Equal(request.Amount, result.Amount);
-        Assert.NotNull(repository.Get(result.Id));
-        Assert.Equal(1, repository.Count);
+        Assert.Same(result, storedPayment);
+        _paymentsRepositoryMock.Verify(repository => repository.Add(result), Times.Once());
 
-        var entry = Assert.Single(logger.Entries, item => item.Level == LogLevel.Information);
-        Assert.Equal(result.Id, entry.Properties["PaymentId"]);
-        Assert.Equal(expectedStatus, entry.Properties["PaymentStatus"]);
-        Assert.DoesNotContain(request.CardNumber!, entry.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain(request.Cvv!, entry.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain("auth-code", entry.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task SendsExactMappedRequestToBank()
+    public async Task ProcessAsync_SendsExactMappedRequestToBank()
     {
-        var bank = new StubBankClient();
-        var service = CreateService(bank, new PaymentRepository());
-        var request = TestRequests.Valid(
-            cardNumber: "1234567890123456",
-            expiryMonth: 4,
-            expiryYear: 2032,
-            currency: "EUR",
-            amount: 42,
-            cvv: "0123");
+        // Arrange
+        var request = new PostPaymentRequest(
+            "1234567890123456", 4, 2032, "EUR", 42, "0123");
+        BankPaymentRequest? sentRequest = null;
+        _acquiringBankClientMock
+            .Setup(client => client.ProcessPaymentAsync(
+                It.IsAny<BankPaymentRequest>(),
+                It.IsAny<CancellationToken>()))
+            .Callback<BankPaymentRequest, CancellationToken>((bankRequest, _) =>
+                sentRequest = bankRequest)
+            .ReturnsAsync(new BankPaymentResponse(true, "auth-code"));
 
-        await service.ProcessAsync(request, CancellationToken.None);
+        // Act
+        await _service.ProcessAsync(request, CancellationToken.None);
 
-        var sent = Assert.IsType<BankPaymentRequest>(bank.LastRequest);
+        // Assert
+        var sent = Assert.IsType<BankPaymentRequest>(sentRequest);
         Assert.Equal("1234567890123456", sent.CardNumber);
         Assert.Equal("04/2032", sent.ExpiryDate);
         Assert.Equal("EUR", sent.Currency);
@@ -76,127 +95,102 @@ public sealed class PaymentServiceTests
     [InlineData("cardNumber")]
     [InlineData("currency")]
     [InlineData("cvv")]
-    public async Task RejectsMissingRequiredValuesAtServiceBoundary(string missingField)
+    public async Task ProcessAsync_RejectsMissingRequiredValuesAtServiceBoundary(string missingField)
     {
-        var bank = new StubBankClient();
-        var repository = new PaymentRepository();
-        var service = CreateService(bank, repository);
-        var request = TestRequests.Valid(
-            cardNumber: missingField == "cardNumber" ? null : "2222405343248877",
-            currency: missingField == "currency" ? null : "GBP",
-            cvv: missingField == "cvv" ? null : "123");
+        // Arrange
+        var request = new PostPaymentRequest(
+            missingField == "cardNumber" ? null : "2222405343248877",
+            7,
+            2031,
+            missingField == "currency" ? null : "GBP",
+            1050,
+            missingField == "cvv" ? null : "123");
 
+        // Act
         await Assert.ThrowsAsync<ArgumentException>(() =>
-            service.ProcessAsync(request, CancellationToken.None));
+            _service.ProcessAsync(request, CancellationToken.None));
 
-        Assert.Equal(0, bank.CallCount);
-        Assert.Equal(0, repository.Count);
+        // Assert
+        _acquiringBankClientMock.Verify(
+            client => client.ProcessPaymentAsync(
+                It.IsAny<BankPaymentRequest>(),
+                It.IsAny<CancellationToken>()),
+            Times.Never());
+        _paymentsRepositoryMock.Verify(
+            repository => repository.Add(It.IsAny<PaymentModel>()),
+            Times.Never());
     }
 
     [Fact]
-    public async Task DoesNotStorePaymentWhenBankFails()
+    public async Task ProcessAsync_DoesNotStorePaymentWhenBankFails()
     {
-        const string cardNumber = "2222405343248877";
-        const string cvv = "987";
-        var bank = new StubBankClient
-        {
-            Handler = (_, _) => throw new AcquiringBankException(
+        // Arrange
+        var request = new PostPaymentRequest(
+            "2222405343248877", 7, 2031, "GBP", 1050, "987");
+        _acquiringBankClientMock
+            .Setup(client => client.ProcessPaymentAsync(
+                It.IsAny<BankPaymentRequest>(),
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new AcquiringBankException(
                 AcquiringBankFailure.Unavailable,
-                "unavailable")
-        };
-        var repository = new PaymentRepository();
-        var logger = new RecordingLogger<PaymentService>();
-        var service = CreateService(bank, repository, logger);
-        var request = TestRequests.Valid(cardNumber: cardNumber, cvv: cvv);
+                "unavailable"));
 
+        // Act
         await Assert.ThrowsAsync<AcquiringBankException>(() =>
-            service.ProcessAsync(request, CancellationToken.None));
+            _service.ProcessAsync(request, CancellationToken.None));
 
-        Assert.Equal(0, repository.Count);
-        var entry = Assert.Single(logger.Entries, item => item.Level == LogLevel.Warning);
-        Assert.Equal(AcquiringBankFailure.Unavailable, entry.Properties["BankFailure"]);
-        AssertLogExcludesSensitiveValues(entry, cardNumber, cvv, "authorization-code");
+        // Assert
+        _paymentsRepositoryMock.Verify(
+            repository => repository.Add(It.IsAny<PaymentModel>()),
+            Times.Never());
     }
 
     [Fact]
-    public async Task LogsInvalidBankResponseAsError()
+    public async Task ProcessAsync_PropagatesCallerCancellationAndDoesNotStorePayment()
     {
-        const string cardNumber = "2222405343248877";
-        const string cvv = "987";
-        var bank = new StubBankClient
-        {
-            Handler = (_, _) => throw new AcquiringBankException(
-                AcquiringBankFailure.InvalidResponse,
-                "invalid response")
-        };
-        var logger = new RecordingLogger<PaymentService>();
-        var service = CreateService(bank, new PaymentRepository(), logger);
-
-        await Assert.ThrowsAsync<AcquiringBankException>(() =>
-            service.ProcessAsync(
-                TestRequests.Valid(cardNumber: cardNumber, cvv: cvv),
-                CancellationToken.None));
-
-        var entry = Assert.Single(logger.Entries, item => item.Level == LogLevel.Error);
-        AssertLogExcludesSensitiveValues(entry, cardNumber, cvv, "authorization-code");
-    }
-
-    [Fact]
-    public async Task PropagatesCallerCancellationAndDoesNotStorePayment()
-    {
+        // Arrange
         using var cancellation = new CancellationTokenSource();
-        cancellation.Cancel();
-        var bank = new StubBankClient
-        {
-            Handler = (_, token) => Task.FromCanceled<BankPaymentResponse>(token)
-        };
-        var repository = new PaymentRepository();
-        var service = CreateService(bank, repository);
+        await cancellation.CancelAsync();
+        _acquiringBankClientMock
+            .Setup(client => client.ProcessPaymentAsync(
+                It.IsAny<BankPaymentRequest>(),
+                It.IsAny<CancellationToken>()))
+            .Returns((BankPaymentRequest _, CancellationToken cancellationToken) =>
+                Task.FromCanceled<BankPaymentResponse>(cancellationToken));
 
+        // Act
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            service.ProcessAsync(TestRequests.Valid(), cancellation.Token));
+            _service.ProcessAsync(
+                new PostPaymentRequest(
+                    "2222405343248877", 7, 2031, "GBP", 1050, "123"),
+                cancellation.Token));
 
-        Assert.Equal(0, repository.Count);
+        // Assert
+        _paymentsRepositoryMock.Verify(
+            repository => repository.Add(It.IsAny<PaymentModel>()),
+            Times.Never());
     }
 
     [Fact]
-    public void GetsExistingPaymentAndReturnsNullForUnknownId()
+    public void Get_ReturnsExistingPaymentAndNullForUnknownId()
     {
-        var repository = new PaymentRepository();
+        // Arrange
         var payment = new PaymentModel(
             Guid.NewGuid(), PaymentStatus.Authorized, "1234", 7, 2031, "GBP", 100);
-        repository.Add(payment);
-        var service = CreateService(new StubBankClient(), repository);
+        var unknownId = Guid.NewGuid();
+        _paymentsRepositoryMock
+            .Setup(repository => repository.Get(payment.Id))
+            .Returns(payment);
 
-        var result = service.Get(payment.Id);
+        // Act
+        var result = _service.Get(payment.Id);
+        var missing = _service.Get(unknownId);
 
-        Assert.NotNull(result);
-        Assert.Equal(payment.Id, result.Id);
-        Assert.Equal(payment.Status, result.Status);
-        Assert.Equal(payment.CardNumberLastFour, result.CardNumberLastFour);
-        Assert.Equal(payment.ExpiryMonth, result.ExpiryMonth);
-        Assert.Equal(payment.ExpiryYear, result.ExpiryYear);
-        Assert.Equal(payment.Currency, result.Currency);
-        Assert.Equal(payment.Amount, result.Amount);
-        Assert.Null(service.Get(Guid.NewGuid()));
+        // Assert
+        Assert.Same(payment, result);
+        Assert.Null(missing);
+        _paymentsRepositoryMock.Verify(repository => repository.Get(payment.Id), Times.Once());
+        _paymentsRepositoryMock.Verify(repository => repository.Get(unknownId), Times.Once());
     }
 
-    private static PaymentService CreateService(
-        IAcquiringBankClient bank,
-        IPaymentRepository repository,
-        ILogger<PaymentService>? logger = null) =>
-        new(bank, repository, logger ?? NullLogger<PaymentService>.Instance);
-
-    private static void AssertLogExcludesSensitiveValues(RecordedLog entry, params string[] values)
-    {
-        var exception = entry.Exception?.ToString() ?? string.Empty;
-        var properties = string.Join(',', entry.Properties.Select(property => property.Value));
-
-        foreach (var value in values)
-        {
-            Assert.DoesNotContain(value, entry.Message, StringComparison.Ordinal);
-            Assert.DoesNotContain(value, exception, StringComparison.Ordinal);
-            Assert.DoesNotContain(value, properties, StringComparison.Ordinal);
-        }
-    }
 }

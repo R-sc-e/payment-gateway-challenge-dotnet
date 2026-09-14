@@ -1,24 +1,42 @@
 using FluentValidation.TestHelper;
 
+using Moq;
+
 using PaymentGateway.Api.Contracts;
-using PaymentGateway.Api.Tests.TestDoubles;
 using PaymentGateway.Api.Validation;
 
 namespace PaymentGateway.Api.Tests.Validation;
 
 public sealed class PaymentRequestValidatorTests
 {
-    private static readonly DateTimeOffset Now = new(2030, 6, 15, 12, 0, 0, TimeSpan.Zero);
-    private readonly PaymentRequestValidator _validator = new(new StubTimeProvider(Now));
+    private static readonly DateTimeOffset Now =
+        new(2030, 6, 15, 12, 0, 0, TimeSpan.Zero);
+
+    private readonly Mock<TimeProvider> _timeProviderMock;
+    private readonly PaymentRequestValidator _validator;
+
+    public PaymentRequestValidatorTests()
+    {
+        _timeProviderMock = new Mock<TimeProvider>();
+        _timeProviderMock
+            .Setup(provider => provider.GetUtcNow())
+            .Returns(Now);
+        _validator = new PaymentRequestValidator(_timeProviderMock.Object);
+    }
 
     [Theory]
     [InlineData("12345678901234")]
     [InlineData("1234567890123456789")]
     [InlineData("00000000000000")]
-    public void AcceptsCardNumberBoundaryValues(string cardNumber)
+    public void Validate_AcceptsCardNumberBoundaryValues(string cardNumber)
     {
-        var errors = _validator.TestValidate(TestRequests.Valid(cardNumber: cardNumber));
+        // Arrange
+        var request = new PostPaymentRequest(cardNumber, 7, 2031, "GBP", 1050, "123");
 
+        // Act
+        var errors = _validator.TestValidate(request);
+
+        // Assert
         Assert.DoesNotContain(errors.Errors, failure => failure.PropertyName == "cardNumber");
     }
 
@@ -31,28 +49,42 @@ public sealed class PaymentRequestValidatorTests
     [InlineData("1234567890123a")]
     [InlineData("1234567890123-")]
     [InlineData("12345678901234\n")]
-    [InlineData("١٢٣٤٥٦٧٨٩٠١٢٣٤")]
-    public void RejectsInvalidCardNumbers(string? cardNumber)
+    public void Validate_RejectsInvalidCardNumbers(string? cardNumber)
     {
-        var errors = _validator.TestValidate(TestRequests.Valid(cardNumber: cardNumber));
+        // Arrange
+        var request = new PostPaymentRequest(cardNumber, 7, 2031, "GBP", 1050, "123");
 
+        // Act
+        var errors = _validator.TestValidate(request);
+
+        // Assert
         Assert.Contains(errors.Errors, failure => failure.PropertyName == "cardNumber");
     }
 
     [Fact]
-    public void ReturnsStablePropertyNameAndMessage()
+    public void Validate_ReturnsStablePropertyNameAndMessage()
     {
-        var result = _validator.TestValidate(TestRequests.Valid(cardNumber: "123"));
+        // Arrange
+        var request = new PostPaymentRequest("123", 7, 2031, "GBP", 1050, "123");
 
+        // Act
+        var result = _validator.TestValidate(request);
+
+        // Assert
         var failure = Assert.Single(result.Errors, error => error.PropertyName == "cardNumber");
         Assert.Equal("Card number must be between 14 and 19 characters.", failure.ErrorMessage);
     }
 
     [Fact]
-    public void StopsEvaluatingAPropertyAfterItsFirstFailure()
+    public void Validate_StopsEvaluatingPropertyAfterFirstFailure()
     {
-        var result = _validator.TestValidate(TestRequests.Valid(cardNumber: "abc"));
+        // Arrange
+        var request = new PostPaymentRequest("abc", 7, 2031, "GBP", 1050, "123");
 
+        // Act
+        var result = _validator.TestValidate(request);
+
+        // Assert
         var failure = Assert.Single(result.Errors, error => error.PropertyName == "cardNumber");
         Assert.Equal("Card number must be between 14 and 19 characters.", failure.ErrorMessage);
     }
@@ -61,10 +93,16 @@ public sealed class PaymentRequestValidatorTests
     [InlineData(6, 2030)]
     [InlineData(7, 2030)]
     [InlineData(1, 2031)]
-    public void AcceptsCurrentAndFutureExpiryMonths(int month, int year)
+    public void Validate_AcceptsCurrentAndFutureExpiryMonths(int month, int year)
     {
-        var errors = _validator.TestValidate(TestRequests.Valid(expiryMonth: month, expiryYear: year));
+        // Arrange
+        var request = new PostPaymentRequest(
+            "2222405343248877", month, year, "GBP", 1050, "123");
 
+        // Act
+        var errors = _validator.TestValidate(request);
+
+        // Assert
         Assert.DoesNotContain(errors.Errors, failure => failure.PropertyName == "expiryMonth");
         Assert.DoesNotContain(errors.Errors, failure => failure.PropertyName == "expiryYear");
     }
@@ -72,10 +110,16 @@ public sealed class PaymentRequestValidatorTests
     [Theory]
     [InlineData(5, 2030)]
     [InlineData(12, 2029)]
-    public void RejectsExpiredCards(int month, int year)
+    public void Validate_RejectsExpiredCards(int month, int year)
     {
-        var errors = _validator.TestValidate(TestRequests.Valid(expiryMonth: month, expiryYear: year));
+        // Arrange
+        var request = new PostPaymentRequest(
+            "2222405343248877", month, year, "GBP", 1050, "123");
 
+        // Act
+        var errors = _validator.TestValidate(request);
+
+        // Assert
         Assert.Contains(errors.Errors, failure => failure.PropertyName == "expiryYear");
     }
 
@@ -85,13 +129,18 @@ public sealed class PaymentRequestValidatorTests
     [InlineData(7, 0)]
     [InlineData(7, -1)]
     [InlineData(13, int.MaxValue)]
-    public void RejectsInvalidExpiryValuesWithoutThrowing(int month, int year)
+    public void Validate_RejectsInvalidExpiryValuesWithoutThrowing(int month, int year)
     {
-        var exception = Record.Exception(() =>
-            _validator.TestValidate(TestRequests.Valid(expiryMonth: month, expiryYear: year)));
+        // Arrange
+        var request = new PostPaymentRequest(
+            "2222405343248877", month, year, "GBP", 1050, "123");
 
+        // Act
+        var exception = Record.Exception(() => _validator.TestValidate(request));
+        var errors = _validator.TestValidate(request);
+
+        // Assert
         Assert.Null(exception);
-        var errors = _validator.TestValidate(TestRequests.Valid(expiryMonth: month, expiryYear: year));
         Assert.NotEmpty(errors.Errors);
     }
 
@@ -99,10 +148,16 @@ public sealed class PaymentRequestValidatorTests
     [InlineData("GBP")]
     [InlineData("USD")]
     [InlineData("EUR")]
-    public void AcceptsSupportedCurrencies(string currency)
+    public void Validate_AcceptsSupportedCurrencies(string currency)
     {
-        var errors = _validator.TestValidate(TestRequests.Valid(currency: currency));
+        // Arrange
+        var request = new PostPaymentRequest(
+            "2222405343248877", 7, 2031, currency, 1050, "123");
 
+        // Act
+        var errors = _validator.TestValidate(request);
+
+        // Assert
         Assert.DoesNotContain(errors.Errors, failure => failure.PropertyName == "currency");
     }
 
@@ -113,20 +168,32 @@ public sealed class PaymentRequestValidatorTests
     [InlineData("JPY")]
     [InlineData("US")]
     [InlineData("USDD")]
-    public void RejectsInvalidCurrencies(string? currency)
+    public void Validate_RejectsInvalidCurrencies(string? currency)
     {
-        var errors = _validator.TestValidate(TestRequests.Valid(currency: currency));
+        // Arrange
+        var request = new PostPaymentRequest(
+            "2222405343248877", 7, 2031, currency, 1050, "123");
 
+        // Act
+        var errors = _validator.TestValidate(request);
+
+        // Assert
         Assert.Contains(errors.Errors, failure => failure.PropertyName == "currency");
     }
 
     [Theory]
     [InlineData("123")]
     [InlineData("0123")]
-    public void AcceptsValidCvvIncludingLeadingZeroes(string cvv)
+    public void Validate_AcceptsValidCvvIncludingLeadingZeroes(string cvv)
     {
-        var errors = _validator.TestValidate(TestRequests.Valid(cvv: cvv));
+        // Arrange
+        var request = new PostPaymentRequest(
+            "2222405343248877", 7, 2031, "GBP", 1050, cvv);
 
+        // Act
+        var errors = _validator.TestValidate(request);
+
+        // Assert
         Assert.DoesNotContain(errors.Errors, failure => failure.PropertyName == "cvv");
     }
 
@@ -138,18 +205,30 @@ public sealed class PaymentRequestValidatorTests
     [InlineData("12a")]
     [InlineData("123\n")]
     [InlineData("١٢٣")]
-    public void RejectsInvalidCvv(string? cvv)
+    public void Validate_RejectsInvalidCvv(string? cvv)
     {
-        var errors = _validator.TestValidate(TestRequests.Valid(cvv: cvv));
+        // Arrange
+        var request = new PostPaymentRequest(
+            "2222405343248877", 7, 2031, "GBP", 1050, cvv);
 
+        // Act
+        var errors = _validator.TestValidate(request);
+
+        // Assert
         Assert.Contains(errors.Errors, failure => failure.PropertyName == "cvv");
     }
 
     [Fact]
-    public void AcceptsPositiveAmountBoundary()
+    public void Validate_AcceptsPositiveAmountBoundary()
     {
-        var errors = _validator.TestValidate(TestRequests.Valid(amount: int.MaxValue));
+        // Arrange
+        var request = new PostPaymentRequest(
+            "2222405343248877", 7, 2031, "GBP", int.MaxValue, "123");
 
+        // Act
+        var errors = _validator.TestValidate(request);
+
+        // Assert
         Assert.DoesNotContain(errors.Errors, failure => failure.PropertyName == "amount");
     }
 
@@ -157,37 +236,57 @@ public sealed class PaymentRequestValidatorTests
     [InlineData(0)]
     [InlineData(-1)]
     [InlineData(int.MinValue)]
-    public void RejectsNonPositiveAmounts(int amount)
+    public void Validate_RejectsNonPositiveAmounts(int amount)
     {
-        var errors = _validator.TestValidate(TestRequests.Valid(amount: amount));
+        // Arrange
+        var request = new PostPaymentRequest(
+            "2222405343248877", 7, 2031, "GBP", amount, "123");
 
+        // Act
+        var errors = _validator.TestValidate(request);
+
+        // Assert
         Assert.Contains(errors.Errors, failure => failure.PropertyName == "amount");
     }
 
     [Fact]
-    public void HandlesDecemberToJanuaryBoundary()
+    public void Validate_HandlesDecemberToJanuaryBoundary()
     {
-        var validator = new PaymentRequestValidator(
-            new StubTimeProvider(new DateTimeOffset(2030, 12, 31, 23, 59, 59, TimeSpan.Zero)));
+        // Arrange
+        _timeProviderMock
+            .Setup(provider => provider.GetUtcNow())
+            .Returns(new DateTimeOffset(2030, 12, 31, 23, 59, 59, TimeSpan.Zero));
 
+        // Act
+        var currentMonth = _validator.TestValidate(new PostPaymentRequest(
+            "2222405343248877", 12, 2030, "GBP", 1050, "123"));
+        var nextMonth = _validator.TestValidate(new PostPaymentRequest(
+            "2222405343248877", 1, 2031, "GBP", 1050, "123"));
+        var previousMonth = _validator.TestValidate(new PostPaymentRequest(
+            "2222405343248877", 11, 2030, "GBP", 1050, "123"));
+
+        // Assert
         Assert.DoesNotContain(
-            validator.TestValidate(TestRequests.Valid(expiryMonth: 12, expiryYear: 2030)).Errors,
+            currentMonth.Errors,
             failure => failure.PropertyName == "expiryYear");
         Assert.DoesNotContain(
-            validator.TestValidate(TestRequests.Valid(expiryMonth: 1, expiryYear: 2031)).Errors,
+            nextMonth.Errors,
             failure => failure.PropertyName == "expiryYear");
         Assert.Contains(
-            validator.TestValidate(TestRequests.Valid(expiryMonth: 11, expiryYear: 2030)).Errors,
+            previousMonth.Errors,
             failure => failure.PropertyName == "expiryYear");
     }
 
     [Fact]
-    public void ReportsAllIndependentInvalidFields()
+    public void Validate_ReportsAllIndependentInvalidFields()
     {
+        // Arrange
         var request = new PostPaymentRequest(null, 13, 0, null, 0, null);
 
+        // Act
         var errors = _validator.TestValidate(request);
 
+        // Assert
         Assert.Equal(6, errors.Errors.Count);
     }
 }

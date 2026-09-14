@@ -1,10 +1,8 @@
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /source
 
-COPY PaymentGateway.sln ./
 COPY src/PaymentGateway.Api/PaymentGateway.Api.csproj src/PaymentGateway.Api/
-COPY test/PaymentGateway.Api.Tests/PaymentGateway.Api.Tests.csproj test/PaymentGateway.Api.Tests/
-RUN dotnet restore PaymentGateway.sln
+RUN dotnet restore src/PaymentGateway.Api/PaymentGateway.Api.csproj
 
 COPY . .
 RUN dotnet publish src/PaymentGateway.Api/PaymentGateway.Api.csproj \

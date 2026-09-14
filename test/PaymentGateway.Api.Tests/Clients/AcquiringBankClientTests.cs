@@ -1,132 +1,207 @@
 using System.Net;
+using System.Net.Mime;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+
+using Moq;
+using Moq.Protected;
 
 using PaymentGateway.Api.Clients;
 using PaymentGateway.Api.Enums;
-using PaymentGateway.Api.Tests.TestDoubles;
 
 namespace PaymentGateway.Api.Tests.Clients;
 
-public sealed class AcquiringBankClientTests
+public sealed class AcquiringBankClientTests : IDisposable
 {
+    private const string AuthorizationCode = "authorization-code";
+
+    private static readonly Uri BankBaseAddress = new("http://bank.test/");
+
     private static readonly BankPaymentRequest Request =
         new("2222405343248877", "04/2032", "GBP", 1050, "123");
 
-    [Theory]
-    [InlineData(true, "authorization-code")]
-    [InlineData(false, "")]
-    public async Task ParsesSuccessfulResponses(bool authorized, string authorizationCode)
+    private readonly Mock<HttpMessageHandler> _handlerMock;
+    private readonly HttpClient _httpClient;
+    private readonly AcquiringBankClient _client;
+    private HttpMethod? _lastMethod;
+    private Uri? _lastUri;
+    private string? _lastBody;
+
+    public AcquiringBankClientTests()
     {
-        var handler = Responds(HttpStatusCode.OK, $$"""
-            {"authorized":{{authorized.ToString().ToLowerInvariant()}},"authorization_code":"{{authorizationCode}}"}
-            """);
-        var client = CreateClient(handler);
+        _handlerMock = new Mock<HttpMessageHandler>();
+        _httpClient = new HttpClient(_handlerMock.Object)
+        {
+            BaseAddress = BankBaseAddress
+        };
+        _client = new AcquiringBankClient(_httpClient);
+    }
 
-        var response = await client.ProcessPaymentAsync(Request, CancellationToken.None);
+    public static TheoryData<string> InvalidResponses => new()
+    {
+        string.Empty,
+        "not-json",
+        JsonSerializer.Serialize(new { }),
+        JsonSerializer.Serialize(new { authorized = false }),
+        JsonSerializer.Serialize(new { authorized = true, authorization_code = string.Empty })
+    };
 
+    [Theory]
+    [InlineData(true, AuthorizationCode)]
+    [InlineData(false, "")]
+    public async Task ProcessPaymentAsync_ParsesSuccessfulResponse(
+        bool authorized,
+        string authorizationCode)
+    {
+        // Arrange
+        RespondsWithJson(HttpStatusCode.OK, new
+        {
+            authorized,
+            authorization_code = authorizationCode
+        });
+
+        // Act
+        var response = await _client.ProcessPaymentAsync(Request, CancellationToken.None);
+
+        // Assert
         Assert.Equal(authorized, response.Authorized);
         Assert.Equal(authorizationCode, response.AuthorizationCode);
     }
 
     [Fact]
-    public async Task SendsExpectedMethodPathAndSnakeCaseJson()
+    public async Task ProcessPaymentAsync_SendsExpectedMethodPathAndSnakeCaseJson()
     {
-        var handler = Responds(HttpStatusCode.OK, """{"authorized":true,"authorization_code":"code"}""");
-        var client = CreateClient(handler);
+        // Arrange
+        RespondsWithJson(HttpStatusCode.OK, new
+        {
+            authorized = true,
+            authorization_code = AuthorizationCode
+        });
 
-        await client.ProcessPaymentAsync(Request, CancellationToken.None);
+        // Act
+        await _client.ProcessPaymentAsync(Request, CancellationToken.None);
 
-        Assert.Equal(HttpMethod.Post, handler.LastMethod);
-        Assert.Equal("http://bank.test/payments", handler.LastUri?.ToString());
-        using var body = JsonDocument.Parse(Assert.IsType<string>(handler.LastBody));
-        Assert.Equal("2222405343248877", body.RootElement.GetProperty("card_number").GetString());
-        Assert.Equal("04/2032", body.RootElement.GetProperty("expiry_date").GetString());
-        Assert.Equal("GBP", body.RootElement.GetProperty("currency").GetString());
-        Assert.Equal(1050, body.RootElement.GetProperty("amount").GetInt32());
-        Assert.Equal("123", body.RootElement.GetProperty("cvv").GetString());
+        // Assert
+        Assert.Equal(HttpMethod.Post, _lastMethod);
+        Assert.Equal(new Uri(BankBaseAddress, "payments"), _lastUri);
+
+        var actualBody = JsonNode.Parse(Assert.IsType<string>(_lastBody));
+        var expectedBody = JsonSerializer.SerializeToNode(new
+        {
+            card_number = Request.CardNumber,
+            expiry_date = Request.ExpiryDate,
+            currency = Request.Currency,
+            amount = Request.Amount,
+            cvv = Request.Cvv
+        });
+
+        Assert.True(JsonNode.DeepEquals(expectedBody, actualBody));
+        _handlerMock.Protected().Verify(
+            "SendAsync",
+            Times.Once(),
+            ItExpr.IsAny<HttpRequestMessage>(),
+            ItExpr.IsAny<CancellationToken>());
     }
 
     [Theory]
     [InlineData(HttpStatusCode.BadRequest)]
     [InlineData(HttpStatusCode.ServiceUnavailable)]
-    public async Task MapsNonSuccessResponsesToUnavailable(HttpStatusCode status)
+    public async Task ProcessPaymentAsync_MapsNonSuccessResponseToUnavailable(HttpStatusCode status)
     {
-        var client = CreateClient(Responds(status, "{}"));
+        // Arrange
+        RespondsWithJson(status, new { });
 
+        // Act
         var exception = await Assert.ThrowsAsync<AcquiringBankException>(() =>
-            client.ProcessPaymentAsync(Request, CancellationToken.None));
+            _client.ProcessPaymentAsync(Request, CancellationToken.None));
 
+        // Assert
         Assert.Equal(AcquiringBankFailure.Unavailable, exception.Failure);
     }
 
     [Theory]
-    [InlineData("")]
-    [InlineData("not-json")]
-    [InlineData("{}")]
-    [InlineData("{\"authorized\":false}")]
-    [InlineData("{\"authorized\":true,\"authorization_code\":\"\"}")]
-    public async Task RejectsMalformedOrIncompleteResponse(string content)
+    [MemberData(nameof(InvalidResponses))]
+    public async Task ProcessPaymentAsync_RejectsMalformedOrIncompleteResponse(string content)
     {
-        var client = CreateClient(Responds(HttpStatusCode.OK, content));
+        // Arrange
+        Responds(HttpStatusCode.OK, content);
 
+        // Act
         var exception = await Assert.ThrowsAsync<AcquiringBankException>(() =>
-            client.ProcessPaymentAsync(Request, CancellationToken.None));
+            _client.ProcessPaymentAsync(Request, CancellationToken.None));
 
+        // Assert
         Assert.Equal(AcquiringBankFailure.InvalidResponse, exception.Failure);
     }
 
     [Fact]
-    public async Task MapsNetworkFailureToUnavailable()
+    public async Task ProcessPaymentAsync_MapsNetworkFailureToUnavailable()
     {
-        var handler = new StubHttpMessageHandler
-        {
-            Handler = (_, _) => throw new HttpRequestException("network unavailable")
-        };
-        var client = CreateClient(handler);
+        // Arrange
+        SetupHandler((_, _) => throw new HttpRequestException());
 
+        // Act
         var exception = await Assert.ThrowsAsync<AcquiringBankException>(() =>
-            client.ProcessPaymentAsync(Request, CancellationToken.None));
+            _client.ProcessPaymentAsync(Request, CancellationToken.None));
 
+        // Assert
         Assert.Equal(AcquiringBankFailure.Unavailable, exception.Failure);
     }
 
     [Fact]
-    public async Task MapsHttpClientTimeoutButNotCallerCancellation()
+    public async Task ProcessPaymentAsync_MapsHttpClientTimeoutButNotCallerCancellation()
     {
-        var handler = new StubHttpMessageHandler
+        // Arrange
+        SetupHandler(async (_, cancellationToken) =>
         {
-            Handler = async (_, token) =>
-            {
-                await Task.Delay(Timeout.InfiniteTimeSpan, token);
-                return new HttpResponseMessage(HttpStatusCode.OK);
-            }
-        };
-        using var httpClient = new HttpClient(handler)
-        {
-            BaseAddress = new Uri("http://bank.test/"),
-            Timeout = TimeSpan.FromMilliseconds(20)
-        };
-        var client = new AcquiringBankClient(httpClient);
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return new HttpResponseMessage(HttpStatusCode.OK);
+        });
+        _httpClient.Timeout = TimeSpan.FromMilliseconds(20);
 
+        // Act
         var exception = await Assert.ThrowsAsync<AcquiringBankException>(() =>
-            client.ProcessPaymentAsync(Request, CancellationToken.None));
+            _client.ProcessPaymentAsync(Request, CancellationToken.None));
+
+        // Assert
         Assert.Equal(AcquiringBankFailure.Timeout, exception.Failure);
 
         using var cancellation = new CancellationTokenSource();
-        cancellation.Cancel();
+        await cancellation.CancelAsync();
+
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            client.ProcessPaymentAsync(Request, cancellation.Token));
+            _client.ProcessPaymentAsync(Request, cancellation.Token));
     }
 
-    private static StubHttpMessageHandler Responds(HttpStatusCode status, string content) => new()
-    {
-        Handler = (_, _) => Task.FromResult(new HttpResponseMessage(status)
-        {
-            Content = new StringContent(content, Encoding.UTF8, "application/json")
-        })
-    };
+    public void Dispose() => _httpClient.Dispose();
 
-    private static AcquiringBankClient CreateClient(StubHttpMessageHandler handler) =>
-        new(new HttpClient(handler) { BaseAddress = new Uri("http://bank.test/") });
+    private void Responds(HttpStatusCode status, string content) =>
+        SetupHandler((_, _) => Task.FromResult(new HttpResponseMessage(status)
+        {
+            Content = new StringContent(content, Encoding.UTF8, MediaTypeNames.Application.Json)
+        }));
+
+    private void RespondsWithJson<T>(HttpStatusCode status, T content) =>
+        Responds(status, JsonSerializer.Serialize(content));
+
+    private void SetupHandler(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> handler)
+    {
+        _handlerMock
+            .Protected()
+            .Setup<Task<HttpResponseMessage>>(
+                "SendAsync",
+                ItExpr.IsAny<HttpRequestMessage>(),
+                ItExpr.IsAny<CancellationToken>())
+            .Returns(async (HttpRequestMessage request, CancellationToken cancellationToken) =>
+            {
+                _lastMethod = request.Method;
+                _lastUri = request.RequestUri;
+                _lastBody = request.Content is null
+                    ? null
+                    : await request.Content.ReadAsStringAsync(cancellationToken);
+                return await handler(request, cancellationToken);
+            });
+    }
 }
