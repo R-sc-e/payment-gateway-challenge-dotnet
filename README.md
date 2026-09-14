@@ -94,13 +94,14 @@ dotnet test PaymentGateway.sln --configuration Release
 The test approach combines:
 
 - Validator tests for field rules, boundary values, deterministic expiry checks, and independent validation paths.
-- Service tests for request mapping, authorized/declined outcomes, persistence, cancellation, failure behavior, and safe structured logging.
+- Service tests for request mapping, authorized/declined outcomes, persistence, cancellation, and failure behavior.
 - Bank-client tests for the exact HTTP/JSON contract, network failures, timeouts, cancellation, and malformed responses.
 - Repository tests for concurrent access and duplicate identifiers.
-- Startup tests proving invalid bank timeout configuration prevents the host from starting.
-- Controller and application tests for response mapping, Problem Details, sensitive-data protection, routing, health, Swagger, and the complete process-then-retrieve flow. A focused integration set retains the production bank client and replaces only its HTTP transport.
+- Controller tests for collaboration, response mapping, and sanitized bank-failure responses.
+- A separate `PaymentGateway.Api.IntegrationTests` project. Its payment scenarios retain the real MVC pipeline, validator, service, repository, typed bank client, serialization, and a localhost HTTP connection to WireMock for the external bank boundary.
+- Hosted configuration tests proving invalid bank URL/timeout settings fail at startup, plus separate health and OpenAPI smoke checks.
 
-Time, network transport, and the acquiring bank are replaced with small explicit test doubles. CI uses Coverlet to enforce at least 85% total line and branch coverage and uploads the Cobertura report.
+Focused tests create Moq dependencies in their test-class constructors; required loggers use `NullLogger` and logging calls are not asserted. Hosted scenarios use production collaborators and simulate only the acquiring bank. CI collects focused-suite coverage as JSON, merges it into the integration-suite run, enforces at least 85% combined line and branch coverage, and uploads the merged Cobertura report.
 
 ## Future improvements
 
