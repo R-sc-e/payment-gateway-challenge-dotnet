@@ -28,8 +28,10 @@ internal static class ServiceCollectionExtensions
 
         services.Configure<ApiBehaviorOptions>(options =>
             options.InvalidModelStateResponseFactory = CreateInvalidModelStateResponse);
+        
         services.AddProblemDetails(options =>
             options.CustomizeProblemDetails = AddTraceIdentifier);
+        
         services.AddEndpointsApiExplorer();
         services.AddSwaggerGen(ConfigureSwagger);
         services.AddHealthChecks();

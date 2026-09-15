@@ -29,7 +29,7 @@ Start the gateway and bank simulator with Docker:
 docker compose up --build
 ```
 
-With Compose, the API is available at `http://localhost:5000` and Swagger UI at `http://localhost:5000/swagger`.
+With Compose, the API is available at `http://localhost:5001` and Swagger UI at `http://localhost:5001/swagger`.
 
 To run the API with the SDK while the simulator runs in Docker:
 
@@ -38,7 +38,7 @@ docker compose up bank_simulator
 dotnet run --project src/PaymentGateway.Api
 ```
 
-The SDK launch profile uses `http://localhost:5067` and `https://localhost:7092`; port `5000` is only the Compose host port. The bank URL and timeout can be overridden with `AcquiringBank__BaseUrl` and `AcquiringBank__TimeoutSeconds`. Timeout must be between 1 and 120 seconds or startup fails.
+The SDK launch profile uses `http://localhost:5067` and `https://localhost:7092`; port `5001` is only the Compose host port. The bank URL and timeout can be overridden with `AcquiringBank__BaseUrl` and `AcquiringBank__TimeoutSeconds`. Timeout must be between 1 and 120 seconds or startup fails.
 
 ## Assumptions
 

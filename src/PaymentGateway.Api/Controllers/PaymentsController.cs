@@ -64,6 +64,7 @@ public sealed class PaymentsController(
                 "Payment request rejected with {ValidationErrorCount} validation errors on fields {InvalidFields}",
                 1,
                 "request");
+            
             var problem = new ValidationProblemDetails(new Dictionary<string, string[]>
             {
                 ["request"] = ["A payment request body is required."]

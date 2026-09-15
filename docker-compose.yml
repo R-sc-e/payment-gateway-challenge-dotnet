@@ -28,7 +28,7 @@ services:
       bank_simulator:
         condition: service_healthy
     ports:
-      - "5000:8080"
+      - "5001:8080"
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/health/live"]
       interval: 5s
